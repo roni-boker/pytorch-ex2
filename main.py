@@ -14,12 +14,12 @@ import copy
 import matplotlib.pyplot as plt
 import argparse
 
-# # office pc
-# DATA_DIR = '/home/user/Datasets'  
-# RUNS_DIR = '/home/user/Projects/runs/pytorch-ex2'
-# laptop:
-DATA_DIR = '/home/roni/Projects/Data'  
-RUNS_DIR = '/home/roni/Projects/runs/pytorch-ex2'
+# office pc
+DATA_DIR = '/home/user/Datasets'  
+RUNS_DIR = '/home/user/Projects/runs/pytorch-ex2/exp3'
+# # laptop:
+# DATA_DIR = '/home/roni/Projects/Data'  
+# RUNS_DIR = '/home/roni/Projects/runs/pytorch-ex2'
 
 
 
@@ -51,7 +51,8 @@ def get_data_loaders(data_dir:str) -> tuple[DataLoader, DataLoader, DataLoader, 
     data_transforms = {
         'train': transforms.Compose([
             transforms.RandomResizedCrop(224),
-            transforms.RandomHorizontalFlip(),
+            # transforms.RandomHorizontalFlip(),
+            transforms.RandomRotation(5),
             transforms.ToTensor()
         ]), 
 
@@ -63,17 +64,17 @@ def get_data_loaders(data_dir:str) -> tuple[DataLoader, DataLoader, DataLoader, 
     }
 
     train_dataset_temp = datasets.MNIST(root=data_dir, download=False, train=True, transform=data_transforms['train'])
-    val_dataset_temp = datasets.MNIST(root=data_dir, download=False, train=True, transform=data_transforms['test'])
+    val_dataset_temp = datasets.MNIST(root=data_dir, download=False, train=True, transform=data_transforms['train'])
     val_size = len(train_dataset_temp)//5
     indices = torch.randperm(len(train_dataset_temp))
     train_dataset = Subset(train_dataset_temp, indices=indices[:-val_size])
     val_dataset = Subset(val_dataset_temp, indices=indices[-val_size:])
 
-    train_dataloader = DataLoader(train_dataset, batch_size=32, shuffle=True, num_workers=2)
-    val_dataloader = DataLoader(val_dataset, batch_size=32, shuffle=False, num_workers=2)
+    train_dataloader = DataLoader(train_dataset, batch_size=32, shuffle=True, num_workers=4)
+    val_dataloader = DataLoader(val_dataset, batch_size=32, shuffle=False, num_workers=4)
 
     test_dataset = datasets.MNIST(root=data_dir, download=False, train=False, transform=data_transforms['test'])
-    test_dataloader = DataLoader(test_dataset, batch_size=32, shuffle=False, num_workers=2)
+    test_dataloader = DataLoader(test_dataset, batch_size=32, shuffle=False, num_workers=4)
 
     dataloaders = {
         'train': train_dataloader, 
@@ -91,6 +92,14 @@ def train_loop(model:nn.Module, criterion:nn.Module, dataloaders:dict[DataLoader
 
     best_model_weights = copy.deepcopy(model.state_dict())
     best_acc = 0.0
+
+    layout = {
+        "training": {
+            "loss": ["Multiline", ["loss/train", "loss/val"]],
+            "accuracy": ["Multiline", ["accuracy/train", "accuracy/val"]],
+        },
+    }
+    tb_writer.add_custom_scalars(layout)
 
     training_start_time = time.time()
 
@@ -133,20 +142,37 @@ def train_loop(model:nn.Module, criterion:nn.Module, dataloaders:dict[DataLoader
                 running_correct += torch.sum(pred==labels.data)
                 iter_loss = loss.item()
                 iter_accuracy = torch.sum(pred==labels.data).double() / len(labels)
-                tb_writer.add_scalar('training loss', iter_loss, epoch * n_total_steps + i)
-                tb_writer.add_scalar('accuracy', iter_accuracy, epoch * n_total_steps + i)
-            
+
+                tb_writer.add_scalar(f'loss/{phase}', iter_loss, epoch * n_total_steps + i)
+                tb_writer.add_scalar(f'accuracy/{phase}', iter_accuracy, epoch * n_total_steps + i)
+                
             if phase=='train' and scheduler:
                 scheduler.step()
 
             epoch_loss = running_loss / len(dataloaders[phase].dataset)
             epoch_acc = running_correct.double() / len(dataloaders[phase].dataset)
-
             print(f'{phase} Loss: {epoch_loss:.4f} ,  Acc: {epoch_acc:.4f} ,  Phase-time: {(time.time()-phase_start_time):.2f} sec, Dataset-Size: {len(dataloaders[phase].dataset)}')
+            if phase=='train':
+                epoch_train_loss = epoch_loss
+                epoch_train_acc = epoch_acc
+            else:
+                epoch_val_loss = epoch_loss
+                epoch_val_acc = epoch_acc
 
             if phase=='val' and epoch_acc > best_acc:
                 best_acc = epoch_acc
                 best_model_weights = copy.deepcopy(model.state_dict())
+                torch.save({
+                            'epoch': epoch,
+                            'model_state_dict': model.state_dict(),
+                            'optimizer_state_dict': optimizer.state_dict(),
+                            'loss': epoch_val_loss,
+                            'accurcay': epoch_val_acc
+                            }, os.path.join(RUNS_DIR, 'best_model.pt'))
+
+        tb_writer.add_scalars('epoch-loss', {'train':epoch_train_loss, 'val':epoch_val_loss}, epoch)
+        tb_writer.add_scalars('epoch-accuracy', {'train':epoch_train_acc, 'val':epoch_val_acc}, epoch)
+        tb_writer.flush()
 
         print()
 
@@ -155,6 +181,13 @@ def train_loop(model:nn.Module, criterion:nn.Module, dataloaders:dict[DataLoader
         
     #load the weights of the best model:
     model.load_state_dict(best_model_weights)
+    torch.save({
+                'epoch': epoch,
+                'model_state_dict': model.state_dict(),
+                'optimizer_state_dict': optimizer.state_dict(),
+                'loss': epoch_val_loss,
+                'accurcay': epoch_val_acc
+                }, os.path.join(RUNS_DIR, 'final_model.pt'))
 
     return model
 
@@ -214,7 +247,7 @@ if __name__ == '__main__':
 
     dataloaders, class_names = get_data_loaders(args.data_path)
     print(f'classes = {class_names}')
-    example_data, _ = iter(dataloaders['test']).next()
+    example_data, _ = next(iter(dataloaders['test']))
     # print_grid_images(example_data)
     image_grid = torchvision.utils.make_grid(example_data)
     tb_writer.add_image('MNIST images', image_grid)
